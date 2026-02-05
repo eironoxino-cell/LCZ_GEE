@@ -1,7 +1,7 @@
 /**************************************Generate a 30 m LCZ Classification Map Using Multi-source Landsat Data**********************************************/
 var roi = ee.FeatureCollection("projects/pure-ace-465108-e1/assets/AKSYJBJ");
 var style = {'color':'FF0000','width':2,'fillColor':"FF000000"};
-Map.addLayer(roi.style(style), null, '研究区');
+Map.addLayer(roi.style(style), null, '');
 Map.centerObject(roi, 8);
 var date_start = '2023-01-01';
 var date_end = '2023-12-31';
@@ -84,7 +84,7 @@ exportIndices(multi_image, 'NDSVI');
 exportIndices(multi_image, 'NDBI');
 exportIndices(multi_image, 'MNDWI')
 var trainingPoints = ee.FeatureCollection("projects/pure-ace-465108-e1/assets/AKS");
-var sampleBands = multi_image.bandNames();  // 使用包括新特征的所有波段
+var sampleBands = multi_image.bandNames(); 
 var training = multi_image.select(sampleBands).sampleRegions({
   collection: trainingPoints,
   properties: ['CLASS'],
@@ -98,7 +98,7 @@ var classifier = ee.Classifier.smileRandomForest(200)
                 .train({
                   features: trainingPartition,
                   classProperty: 'CLASS',
-                  inputProperties: sampleBands  // 包括DEM、坡度和坡向等波段
+                  inputProperties: sampleBands 
                 });
 
 var classified = multi_image.classify(classifier);

@@ -1,4 +1,4 @@
-
+/**************************************Generate a 30 m LCZ Classification Map Using Multi-source Landsat Data**********************************************/
 var roi = ee.FeatureCollection("projects/pure-ace-465108-e1/assets/AKSYJBJ");
 var style = {'color':'FF0000','width':2,'fillColor':"FF000000"};
 Map.addLayer(roi.style(style), null, '研究区');

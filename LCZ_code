@@ -1,0 +1,256 @@
+/************************************** Generate a 30-m LCZ classification map from multisource Landsat data **************************************/
+var roi = ee.FeatureCollection("projects/pure-ace-465108-e1/assets/Chaoyang");
+var style = {'color':'FF0000','width':2,'fillColor':"FF000000"};
+Map.addLayer(roi.style(style), null, '');
+Map.centerObject(roi, 8);
+var date_start = '2023-01-01';
+// filterDate excludes the end date, so 2024-01-01 is used to cover the full year 2023.
+var date_end = '2024-01-01';
+function maskL8sr(image) {
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+  var opticalBands = image.select('SR_B.').multiply(0.0000275).add(-0.2);
+  var thermalBands = image.select('ST_B.*').multiply(0.00341802).add(149.0);
+  return image.addBands(opticalBands, null, true)
+              .addBands(thermalBands, null, true)
+              .updateMask(qaMask)
+              .updateMask(saturationMask);
+}
+function addIndex(image) {
+  var ndvi = image.normalizedDifference(["SR_B5", "SR_B4"]).rename("NDVI").toFloat();
+  var lswi = image.normalizedDifference(["SR_B5", "SR_B6"]).rename("LSWI").toFloat();
+  var ndsvi = image.normalizedDifference(["SR_B6", "SR_B4"]).rename("NDSVI").toFloat();
+  var ndbi = image.normalizedDifference(['SR_B6','SR_B5']).rename('NDBI').toFloat();
+  var mndwi = image.normalizedDifference(['SR_B3','SR_B6']).rename('MNDWI').toFloat();
+  
+  return image.addBands(ndvi).addBands(lswi).addBands(ndsvi)
+              .addBands(ndbi).addBands(mndwi);
+}
+
+var landsat8 = ee.ImageCollection("LANDSAT/LC08/C02/T1_L2")
+                .filterBounds(roi)
+                .filterDate(date_start, date_end)
+                .filter(ee.Filter.lte('CLOUD_COVER', 10))
+                .map(maskL8sr)
+                .select(['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7'])
+                .map(addIndex);
+
+var landsat9 = ee.ImageCollection("LANDSAT/LC09/C02/T1_L2")
+                .filterBounds(roi)
+                .filterDate(date_start, date_end)
+                .filter(ee.Filter.lte('CLOUD_COVER', 10))
+                .map(maskL8sr)
+                .select(['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5', 'SR_B6', 'SR_B7'])
+                .map(addIndex);
+
+var imgCol = landsat8.merge(landsat9).median().clip(roi);
+Map.addLayer(imgCol, {max: 0.3, min: 0, bands: ['SR_B4', 'SR_B3', 'SR_B2']}, 'RGB');
+var SRTM = ee.Image("USGS/SRTMGL1_003").clip(roi);
+var DEM = SRTM.float(); 
+var aspect = ee.Terrain.aspect(DEM); 
+var slope = ee.Terrain.slope(DEM).float(); 
+var multi_image = imgCol.addBands(DEM).addBands(aspect).addBands(slope);
+var exportIndices = function(image, indexName) {
+  Export.image.toDrive({
+    image: image.select(indexName),
+    description: indexName + '_export',
+    folder: 'indices_exports',
+    scale: 30,
+    region: roi
+  });
+};
+
+exportIndices(multi_image, 'NDVI');
+exportIndices(multi_image, 'LSWI');
+exportIndices(multi_image, 'NDSVI');
+exportIndices(multi_image, 'NDBI');
+exportIndices(multi_image, 'MNDWI')
+// Upload and import the training and validation samples separately.
+// The two assets must be independent and must both contain a class field named LCZ.
+// Replace the asset paths below with the actual paths of the uploaded assets in GEE.
+var trainingPoints = ee.FeatureCollection(
+  "projects/pure-ace-465108-e1/assets/ChaoyangShantou_file1"
+);
+var validationPoints = ee.FeatureCollection(
+  "projects/pure-ace-465108-e1/assets/ChaoyangShantou_file2"
+);
+
+var sampleBands = multi_image.bandNames();
+
+// Training samples are used only to train the classifier.
+var trainingSamples = multi_image.select(sampleBands).sampleRegions({
+  collection: trainingPoints,
+  properties: ['LCZ'],
+  scale: 30,
+  geometries: true
+}).filter(ee.Filter.notNull(sampleBands));
+
+// Validation samples are used only for independent accuracy assessment.
+var validationSamples = multi_image.select(sampleBands).sampleRegions({
+  collection: validationPoints,
+  properties: ['LCZ'],
+  scale: 30,
+  geometries: true
+}).filter(ee.Filter.notNull(sampleBands));
+
+print('Training samples:', trainingSamples.size());
+print('Validation samples:', validationSamples.size());
+
+var classifier = ee.Classifier.smileRandomForest(200)
+                .train({
+                  features: trainingSamples,
+                  classProperty: 'LCZ',
+                  inputProperties: sampleBands
+                });
+var classified = multi_image.classify(classifier);
+var lczPalette = [
+  '#910613',  // LCZ 1: Compact high-rise
+  '#D9081C',  // LCZ 2: Compact mid-rise
+  '#FF0A22',  // LCZ 3: Compact low-rise
+  '#C54F1E',  // LCZ 4: Open high-rise
+  '#FF6628',  // LCZ 5: Open mid-rise
+  '#FF985E',  // LCZ 6: Open low-rise
+  '#FAEE05',  // LCZ 7: Lightweight low-rise
+  '#BBBBBB',  // LCZ 8: Large low-rise
+  '#FFCBAB',  // LCZ 9: Sparsely built
+  '#565656',  // LCZ 10: Heavy industry
+  '#006A18',  // LCZ 11: Dense trees
+  '#00A926',  // LCZ 12: Scattered trees
+  '#628432',  // LCZ 13: Bush and scrub
+  '#B5DA7F',  // LCZ 14: Low plants
+  '#000000',  // LCZ 15: Bare rock or paved
+  '#FCF7B1',  // LCZ 16: Bare soil or sand
+  '#656BFA',  // LCZ 17: Water
+  '#FFFFFF'   // LCZ 18: Unlabelled
+];
+Map.addLayer(classified, {palette: lczPalette, min: 1, max: 18}, 'Classified map');
+
+Export.classifier.toAsset({
+  classifier: classifier,
+  description: 'SJ_2023_classifier',
+  assetId: 'projects/pure-ace-465108-e1/assets/SJ_2023_classifier'
+});
+Export.image.toDrive({
+  image: classified,
+  description: 'classified_image_with_dem',
+  folder: 'classified_images_with_dem',
+  scale: 30,
+  region: roi
+});
+// Predict the independent validation samples; all accuracy metrics are computed from these predictions.
+var validated = validationSamples.classify(classifier);
+// Fix the class order so producer's and consumer's accuracies align with the class IDs.
+var classOrder = ee.List.sequence(1, 18);
+var confusionMatrix = validated.errorMatrix('LCZ', 'classification', classOrder);
+
+// Return null when the denominator is zero instead of reporting zero accuracy for an unrepresented class.
+function safeRatio(numerator, denominator) {
+  numerator = ee.Number(numerator);
+  denominator = ee.Number(denominator);
+  return ee.Algorithms.If(
+    denominator.gt(0), numerator.divide(denominator.max(1)), null
+  );
+}
+
+// Urban-class accuracy: the proportion of samples with the correct class among true classes 1-10.
+// Misclassification as another urban class, a natural class, or the unlabelled class counts as an error.
+var urbanValidation = validated.filter(ee.Filter.inList('LCZ', ee.List.sequence(1, 10)));
+var urbanCorrect = urbanValidation.filter(ee.Filter.equals({
+  leftField: 'LCZ',
+  rightField: 'classification'
+})).size();
+var OAu = safeRatio(urbanCorrect, urbanValidation.size());
+
+// Built-versus-natural binary accuracy: classes 1-10 are built and classes 11-17 are natural.
+// Samples with true class 18 (unlabelled) are excluded from the binary evaluation.
+// Samples predicted as 18 or another invalid class remain in the denominator and count as errors.
+var binaryValidation = validated
+  .filter(ee.Filter.inList('LCZ', ee.List.sequence(1, 17)))
+  .map(function(feature) {
+    var actual = ee.Number(feature.get('LCZ'));
+    var predicted = ee.Number(feature.get('classification'));
+    var actualGroup = ee.Number(ee.Algorithms.If(actual.lte(10), 1, 0));
+    var predictedGroup = ee.Number(ee.Algorithms.If(
+      predicted.gte(1).and(predicted.lte(10)), 1,
+      ee.Algorithms.If(predicted.gte(11).and(predicted.lte(17)), 0, 2)
+    ));
+    return feature.set({
+      actual_group: actualGroup,
+      predicted_group: predictedGroup
+    });
+  });
+var binaryCorrect = binaryValidation.filter(ee.Filter.equals({
+  leftField: 'actual_group',
+  rightField: 'predicted_group'
+})).size();
+var OAbu = safeRatio(binaryCorrect, binaryValidation.size());
+
+print('Confusion matrix (rows: reference classes; columns: predicted classes):', confusionMatrix);
+print('Class order:', classOrder);
+print('Overall Accuracy:', confusionMatrix.accuracy());
+print('Producer Accuracy:', confusionMatrix.producersAccuracy());
+print('Consumer Accuracy:', confusionMatrix.consumersAccuracy());
+print('Kappa Coefficient:', confusionMatrix.kappa());
+print('OAu (urban-class accuracy):', OAu);
+print('OAbu (built-versus-natural binary accuracy):', OAbu);
+print('Number of urban-class validation samples:', urbanValidation.size());
+print('Number of binary validation samples:', binaryValidation.size());
+
+// Export the accuracy table and sample-count table separately as shown in the figure.
+// The accuracy table contains six metrics and their values.
+var accuracyTable = ee.FeatureCollection([
+  ee.Feature(null, {
+    Metric: 'OA',
+    Value: confusionMatrix.accuracy()
+  }),
+  ee.Feature(null, {
+    Metric: 'Kappa',
+    Value: confusionMatrix.kappa()
+  }),
+  ee.Feature(null, {
+    Metric: 'OAu',
+    Value: OAu
+  }),
+  ee.Feature(null, {
+    Metric: 'OAbu',
+    Value: OAbu
+  }),
+  ee.Feature(null, {
+    Metric: 'Producer Accuracy',
+    Value: confusionMatrix.producersAccuracy().toList()
+  }),
+  ee.Feature(null, {
+    Metric: 'Consumer Accuracy',
+    Value: confusionMatrix.consumersAccuracy().toList()
+  })
+]);
+print('Accuracy table:', accuracyTable);
+Export.table.toDrive({
+  collection: accuracyTable,
+  description: 'accuracy_table',
+  folder: 'accuracy_table_exports',
+  fileFormat: 'CSV',
+  selectors: ['Metric', 'Value']
+});
+
+// The sample-count table includes only LCZ 1-17 and counts valid training and validation samples.
+// A valid sample is a record for which all image features were successfully extracted; masked pixels are excluded.
+var sampleClassOrder = ee.List.sequence(1, 17);
+var sampleCountTable = ee.FeatureCollection(sampleClassOrder.map(function(classId) {
+  classId = ee.Number(classId);
+  var classFilter = ee.Filter.eq('CLASS', classId);
+  var trainingCount = trainingSamples.filter(classFilter).size();
+  var validationCount = validationSamples.filter(classFilter).size();
+  return ee.Feature(null, {
+    LCZ: ee.String('LCZ ').cat(classId.format()),
+    Total_sample_count: trainingCount.add(validationCount)
+  });
+}));
+print('Sample-count table:', sampleCountTable);
+Export.table.toDrive({
+  collection: sampleCountTable,
+  description: 'sample_count_table',
+  folder: 'accuracy_table_exports',
+  fileFormat: 'CSV',
+  selectors: ['LCZ', 'Total_sample_count']
+});

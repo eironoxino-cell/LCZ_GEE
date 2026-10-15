@@ -1,0 +1,1 @@
+This script uses Landsat 8/9 imagery, spectral indices, and terrain variables to train a random forest model and generate a 30 m LCZ classification map. It also uses independent validation samples to calculate classification accuracy and exports the classified map, trained model, and accuracy statistics.
